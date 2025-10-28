@@ -3,6 +3,7 @@ struct SimBuffers{ComplexVec, ComplexTensor, FloatVec, FloatTensor, Plan}
     R_00_S0::ComplexTensor
     R_0H_S0::ComplexTensor
     r_s_g::ComplexTensor
+    scratch::ComplexTensor
     alfa::FloatTensor
     ifftplan::Plan
 
@@ -15,6 +16,7 @@ function SimBuffers(shape; ArrayT=CuArray, ComplexT=ComplexF64, FloatT=Float64)
     R_00_S0 = ArrayT{ComplexT, 3}(undef, shape)
     R_0H_S0 = similar(R_00_S0)
     r_s_g = similar(R_00_S0)
+    scratch = similar(R_00_S0)
     alfa = ArrayT{FloatT, 3}(undef, shape)
     ifftplan = CUFFT.plan_ifft(r_s_g)
 
@@ -22,7 +24,7 @@ function SimBuffers(shape; ArrayT=CuArray, ComplexT=ComplexF64, FloatT=Float64)
     Gaussian_ky = ArrayT{ComplexT, 1}(undef, shape[2])
     k0_Theta = ArrayT{FloatT, 1}(undef, shape[3])
 
-    buffers = SimBuffers(R_00_S0, R_0H_S0, r_s_g, alfa, ifftplan,
+    buffers = SimBuffers(R_00_S0, R_0H_S0, r_s_g, scratch, alfa, ifftplan,
                          Gaussian_kx, Gaussian_ky, k0_Theta)
 end
 
@@ -114,6 +116,10 @@ end
     @inbounds k0_Theta[i] = 2 * pi / WaveL
 end
 
+function greens_postprocess(buffers)
+
+end
+
 function laue_strain(
     Energy_Bragg,
     hkl,
@@ -129,7 +135,12 @@ function laue_strain(
     delta_theta_manual=0,
     T=CuArray,
     max_layers=Inf,
+    plane::Union{Vector{Symbol}, Symbol}=[:forward, :diffracted],
     buffers_ref=default_buffers, progressbar=true)
+    if plane isa Symbol
+        plane = [plane]
+    end
+
     # Perpendicular to the surface (100)
     strain_per = pulse.ISD_a
 
@@ -290,39 +301,68 @@ function laue_strain(
         next!(p)
     end
 
-    r_s_g_kernel!(buffers.r_s_g,
-                  buffers.R_0H_S0, buffers.Gaussian_kx, buffers.Gaussian_ky,
-                  buffers.k0_Theta, k0, sigk,
-                  ndrange=size(buffers.r_s_g))
+    diffracted_x_profile = nothing
+    diffracted_y_profile = nothing
+    diffracted_mode_gauss = nothing
+    diffracted_phase = nothing
+    forward_mode_gauss = nothing
+    forward_x_profile = nothing
+    forward_y_profile = nothing
+    forward_phase = nothing
+    for p in plane
+        greens_function = p == :diffracted ? buffers.R_0H_S0 : buffers.R_00_S0
+        r_s_g_kernel!(buffers.r_s_g,
+              greens_function, buffers.Gaussian_kx, buffers.Gaussian_ky,
+              buffers.k0_Theta, k0, sigk,
+              ndrange=size(buffers.r_s_g))
+        
+        CUFFT.fftshift!(buffers.scratch, buffers.r_s_g)
+        mul!(buffers.r_s_g, buffers.ifftplan, buffers.scratch)
+        gaussian_r = CUFFT.fftshift!(buffers.scratch, buffers.r_s_g, (2, 3))
+     
+        gaussian_r_2d = squeeze(sum(gaussian_r, dims=3))
+        # circshift() to fully shift the signal. The plain fftshift()
+        # still leaves a few elements wrapped around the end of the array.
+        gaussian_r_2d = circshift(gaussian_r_2d, (0, 20))
+        mode_gauss_gpu = abs.(gaussian_r_2d)
+        phase_gauss_gpu = angle.(gaussian_r_2d)
+        y_profile = squeeze(Array(sum(mode_gauss_gpu, dims=1)))
+        x_profile = squeeze(Array(sum(mode_gauss_gpu, dims=2)))
 
-    # Warning: here we reuse some of the buffers as temporary arrays
-    tmp = buffers.R_00_S0
+        mode_gauss = permutedims(Array(mode_gauss_gpu), (2, 1))
+        phase_gauss = permutedims(Array(phase_gauss_gpu), (2, 1))
+        
+        if p == :diffracted
+            diffracted_mode_gauss = mode_gauss
+            diffracted_x_profile = x_profile
+            diffracted_y_profile = y_profile
+            diffracted_phase = phase_gauss
+        else
+            forward_mode_gauss = mode_gauss
+            forward_x_profile = x_profile
+            forward_y_profile = y_profile
+            forward_phase = phase_gauss
+        end
+    end
 
     # fftshift all dimensions, inverse FFT, and then fftshift again over the y
     # and t dimensions.
-    CUFFT.fftshift!(tmp, buffers.r_s_g)
-    mul!(buffers.r_s_g, buffers.ifftplan, tmp)
-    gaussian_r = CUFFT.fftshift!(tmp, buffers.r_s_g, (2, 3))
 
-    gaussian_r_2d = squeeze(sum(gaussian_r, dims=3))
-    # circshift() to fully shift the signal. The plain fftshift()
-    # still leaves a few elements wrapped around the end of the array.
-    gaussian_r_2d = circshift(gaussian_r_2d, (0, 20))
-    mode_gaus = abs.(gaussian_r_2d)
-    # phase_gaus = Array(angle.(gaussian_r_2d))
 
-    y_profile = squeeze(Array(sum(mode_gaus, dims=1)))
-    x_profile = squeeze(Array(sum(mode_gaus, dims=2)))
 
     # Swap the dimensions of mode_gaus for simpler plotting
     results = (; # R_0H_S0=Array(buffers.R_0H_S0),
                # R_00_S0=Array(buffers.R_00_S0),
                # k0_Theta=Array(buffers.k0_Theta),
                mean_reflectance=mean(buffers.R_0H_S0),
-               mode_gaus=permutedims(Array(mode_gaus), (2, 1)),
-               # phase_gaus,
-               y_profile,
-               x_profile)
+               diffracted_mode_gauss,
+               diffracted_y_profile,
+               diffracted_x_profile,
+               diffracted_phase,
+               forward_mode_gauss,
+               forward_y_profile,
+               forward_x_profile,
+               forward_phase)
 
     return results
 end
