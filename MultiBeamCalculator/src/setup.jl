@@ -28,7 +28,7 @@ function structure_factor(hkl, energy_center; element = :Si,
         #Reflections and atomic structure factor
         f_0 = if hkl in ((4,0,0), (0,4,0), (0,0,4))
             1.6077047        
-        elseif hkl in ((1,1,1))
+        elseif hkl == (1,1,1)
             3.1379116            
         elseif hkl in ((2,2,0), (2,0,2), (0,2,2))
             2.029862            
@@ -40,7 +40,7 @@ function structure_factor(hkl, energy_center; element = :Si,
             1.4097152        
         elseif hkl in ((2,2,4), (4,2,2), (2,4,2))
             1.454006        
-        elseif hkl in ((4,4,4))
+        elseif hkl == (4,4,4)
             1.1557
         elseif hkl in ((5,3,3), (3,5,3), (3,3,5))
             1.20988
@@ -51,7 +51,7 @@ function structure_factor(hkl, energy_center; element = :Si,
             1.3420491
         elseif hkl in ((5,1,5),(1,5,5),(5,5,1))
             1.1248178
-        elseif hkl in (3,3,3)
+        elseif hkl == (3,3,3)
             1.4097152
         else
             error("Unsupported Miller indices: $(hkl)")
